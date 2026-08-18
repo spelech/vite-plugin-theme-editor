@@ -16,7 +16,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup",
+    "build:client": "node scripts/bundle-client.mjs",
+    "build": "node scripts/bundle-client.mjs && tsup",
     "dev": "tsup --watch",
     "test": "vitest run"
   },
