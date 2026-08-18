@@ -30,6 +30,12 @@ export class ThemeEditorOverlay extends BaseElement {
   private saveBtnEl!: HTMLButtonElement;
   private modalContainerEl!: HTMLElement;
   private toastContainerEl!: HTMLElement;
+  private handleKeydown = (e: KeyboardEvent) => {
+    if (e.altKey && (e.code === 'KeyT' || e.key === 't' || e.key === 'T')) {
+      e.preventDefault();
+      this.toggleDrawer();
+    }
+  };
 
   constructor() {
     super();
@@ -49,11 +55,21 @@ export class ThemeEditorOverlay extends BaseElement {
       }
     }
 
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+      window.addEventListener('keydown', this.handleKeydown);
+    }
+
     this.buildBaseDOM();
     this.loadScanData();
 
     if (typeof this.hasAttribute === 'function' && this.hasAttribute('default-open')) {
       this.openDrawer();
+    }
+  }
+
+  public disconnectedCallback(): void {
+    if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+      window.removeEventListener('keydown', this.handleKeydown);
     }
   }
 
