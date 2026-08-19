@@ -18,6 +18,7 @@
   "scripts": {
     "build:client": "node scripts/bundle-client.mjs",
     "build": "node scripts/bundle-client.mjs && tsup",
+    "prepare": "npm run build",
     "dev": "tsup --watch",
     "test": "vitest run"
   },
@@ -42,6 +43,7 @@
   "devDependencies": {
     "@types/diff": "^7.0.0",
     "@types/node": "^20.11.0",
+    "esbuild": "^0.21.5",
     "tsup": "^8.0.2",
     "typescript": "^5.4.0",
     "vite": "^6.0.0",
