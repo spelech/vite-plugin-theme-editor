@@ -900,6 +900,28 @@ describe('DomInspector', () => {
       expect(affected).not.toContain(overlay);
       expect(affected).not.toContain(inner);
     });
+
+    it('does not produce false-positive matches for bare property names or substring variables', () => {
+      const el1 = createMockElement('div');
+      el1.setAttribute('style', 'color: red; background-color: blue;');
+      const el2 = createMockElement('div');
+      el2.setAttribute('style', 'color: var(--primary-dark);');
+      const el3 = createMockElement('div');
+      el3.setAttribute('style', 'color: var(--primary);');
+
+      dom.mockDocument.body.appendChild(el1);
+      dom.mockDocument.body.appendChild(el2);
+      dom.mockDocument.body.appendChild(el3);
+
+      // Searching for 'color' should not match el1 just because it has standard 'color: red'
+      const affectedColor = inspector.findAffectedElements('color');
+      expect(affectedColor).not.toContain(el1);
+
+      // Searching for '--primary' should match el3, but NOT el2 (--primary-dark)
+      const affectedPrimary = inspector.findAffectedElements('--primary');
+      expect(affectedPrimary).toContain(el3);
+      expect(affectedPrimary).not.toContain(el2);
+    });
   });
 
   describe('highlightElements and clearHighlights', () => {
@@ -940,6 +962,21 @@ describe('DomInspector', () => {
       const overlay = createMockElement('theme-editor-overlay');
       inspector.highlightElements([overlay]);
       expect(dom.mockDocument.body.querySelectorAll('.theme-editor-highlight-box').length).toBe(0);
+    });
+
+    it('cleans up highlights even when attached to a ShadowRoot with parentNode', () => {
+      const shadowMock = createMockElement('shadow-root');
+      const target = createMockElement('button');
+      dom.mockDocument.body.appendChild(target);
+
+      const shadowInspector = new DomInspector(shadowMock);
+      shadowInspector.highlightElements([target]);
+
+      const boxes = shadowMock.querySelectorAll('.theme-editor-highlight-box');
+      expect(boxes.length).toBe(1);
+
+      shadowInspector.clearHighlights();
+      expect(shadowMock.querySelectorAll('.theme-editor-highlight-box').length).toBe(0);
     });
   });
 
@@ -1002,6 +1039,54 @@ describe('DomInspector', () => {
         })
       );
       expect(inspector.isPickerActive).toBe(false);
+    });
+
+    it('does not intercept clicks or trigger selection on overlay elements', () => {
+      const onSelect = vi.fn();
+      inspector.enablePicker(onSelect);
+
+      const overlay = createMockElement('theme-editor-overlay');
+      const button = createMockElement('button');
+      overlay.appendChild(button);
+      dom.mockDocument.body.appendChild(overlay);
+
+      const clickEvent = {
+        type: 'click',
+        clientX: 100,
+        clientY: 100,
+        target: button,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+        composedPath: vi.fn().mockReturnValue([button, overlay, dom.mockDocument.body])
+      };
+
+      dom.mockDocument.dispatchEvent(clickEvent);
+
+      expect(clickEvent.preventDefault).not.toHaveBeenCalled();
+      expect(clickEvent.stopPropagation).not.toHaveBeenCalled();
+      expect(onSelect).not.toHaveBeenCalled();
+      expect(inspector.isPickerActive).toBe(true);
+    });
+
+    it('does not penetrate through overlay elements in getElementAtPoint', () => {
+      const overlay = createMockElement('theme-editor-overlay');
+      const underlyingElement = createMockElement('div');
+      dom.mockDocument.body.appendChild(underlyingElement);
+      dom.mockDocument.body.appendChild(overlay);
+
+      dom.mockDocument.elementsFromPoint = vi.fn().mockReturnValue([overlay, underlyingElement]);
+
+      inspector.enablePicker(() => {});
+
+      // Mouse movement over overlay should not highlight underlying element
+      dom.mockDocument.dispatchEvent({
+        type: 'mousemove',
+        clientX: 100,
+        clientY: 100,
+        target: overlay
+      });
+
+      expect(dom.mockDocument.body.querySelectorAll('.theme-editor-highlight-box').length).toBe(0);
     });
   });
 });

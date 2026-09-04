@@ -175,6 +175,10 @@ function extractPropertyValue(
   return val ? val.trim() : '';
 }
 
+function escapeRegex(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export class DomInspector {
   public isPickerActive: boolean = false;
   private container: HTMLElement | ShadowRoot | null = null;
@@ -232,13 +236,14 @@ export class DomInspector {
 
     const cleanName = varName.trim();
     const formattedVar = cleanName.startsWith('--') ? cleanName : `--${cleanName}`;
+    const varRegex = new RegExp(`(?:^|[^a-zA-Z0-9_-])${escapeRegex(formattedVar)}(?:[^a-zA-Z0-9_-]|$)`);
     const allElements = getAllDocumentElements();
     const matched = new Set<Element>();
 
     // 1. Check inline styles and attributes for each element
     for (const el of allElements) {
       const styleAttr = el.getAttribute?.('style') || '';
-      if (styleAttr.includes(formattedVar) || styleAttr.includes(cleanName)) {
+      if (varRegex.test(styleAttr)) {
         matched.add(el);
         continue;
       }
@@ -254,19 +259,19 @@ export class DomInspector {
         }
 
         const cssText = inlineStyle.cssText || '';
-        if (cssText.includes(formattedVar) || cssText.includes(cleanName)) {
+        if (varRegex.test(cssText)) {
           matched.add(el);
           continue;
         }
 
-        // Check if inline custom properties or object keys/values reference var
+        // Check if inline custom properties or object keys/values reference formattedVar
         for (const key of Object.keys(inlineStyle)) {
-          if (key === formattedVar || key === cleanName) {
+          if (key === formattedVar) {
             matched.add(el);
             break;
           }
           const val = String(inlineStyle[key] || '');
-          if (val.includes(formattedVar) || val.includes(cleanName)) {
+          if (varRegex.test(val)) {
             matched.add(el);
             break;
           }
@@ -274,7 +279,7 @@ export class DomInspector {
       }
     }
 
-    // 2. Check stylesheet rules across document
+    // 2. Check stylesheet rules across document using fast querySelectorAll
     if (document.styleSheets) {
       const sheets = Array.from(document.styleSheets as any);
       for (const sheet of sheets) {
@@ -283,13 +288,21 @@ export class DomInspector {
           for (let i = 0; i < rules.length; i++) {
             const rule = rules[i];
             const cssText = rule.cssText || '';
-            if (cssText.includes(formattedVar) || cssText.includes(cleanName)) {
+            if (varRegex.test(cssText)) {
               const selector = rule.selectorText;
               if (selector) {
-                for (const el of allElements) {
-                  if (typeof (el as any).matches === 'function') {
+                try {
+                  const queried = document.querySelectorAll(selector);
+                  if (queried) {
+                    for (let j = 0; j < queried.length; j++) {
+                      matched.add(queried[j]);
+                    }
+                  }
+                } catch {
+                  // Fallback for custom or unsupported selectors
+                  for (const el of allElements) {
                     try {
-                      if ((el as any).matches(selector)) {
+                      if ((el as any).matches?.(selector)) {
                         matched.add(el);
                       }
                     } catch {}
@@ -351,10 +364,10 @@ export class DomInspector {
 
   public clearHighlights(): void {
     for (const box of this.highlightBoxes) {
-      if (box.parentElement) {
-        box.parentElement.removeChild(box);
-      } else if (typeof (box as any).remove === 'function') {
+      if (typeof (box as any).remove === 'function') {
         (box as any).remove();
+      } else if (box.parentNode) {
+        box.parentNode.removeChild(box);
       }
     }
     this.highlightBoxes = [];
@@ -394,17 +407,41 @@ export class DomInspector {
     this.clearHighlights();
   }
 
+  private isEventInsideOverlay(e: MouseEvent): boolean {
+    const target = e.target as Element | null;
+    if (isOverlayElement(target)) return true;
+
+    if (typeof e.composedPath === 'function') {
+      try {
+        const path = e.composedPath();
+        if (Array.isArray(path)) {
+          for (const node of path) {
+            if (isOverlayElement(node as Element)) {
+              return true;
+            }
+          }
+        }
+      } catch {}
+    }
+
+    return false;
+  }
+
   private getElementAtPoint(x?: number, y?: number, fallbackTarget?: Element): Element | null {
-    if (typeof document === 'undefined') return fallbackTarget || null;
+    if (typeof document === 'undefined') {
+      return fallbackTarget && !isOverlayElement(fallbackTarget) ? fallbackTarget : null;
+    }
 
     if (x !== undefined && y !== undefined) {
       if (typeof document.elementsFromPoint === 'function') {
         try {
           const elements = document.elementsFromPoint(x, y);
-          for (const el of elements) {
-            if (!isOverlayElement(el)) {
-              return el;
+          if (elements && elements.length > 0) {
+            // If top element belongs to overlay, do not penetrate through
+            if (isOverlayElement(elements[0])) {
+              return null;
             }
+            return elements[0];
           }
         } catch {}
       }
@@ -412,7 +449,10 @@ export class DomInspector {
       if (typeof document.elementFromPoint === 'function') {
         try {
           const el = document.elementFromPoint(x, y);
-          if (el && !isOverlayElement(el)) {
+          if (el) {
+            if (isOverlayElement(el)) {
+              return null;
+            }
             return el;
           }
         } catch {}
@@ -440,6 +480,11 @@ export class DomInspector {
 
   private handleClick = (e: MouseEvent) => {
     if (!this.isPickerActive) return;
+
+    // If click is inside the overlay, let the overlay process its own UI events
+    if (this.isEventInsideOverlay(e)) {
+      return;
+    }
 
     if (typeof e.preventDefault === 'function') {
       e.preventDefault();
