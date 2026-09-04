@@ -342,5 +342,125 @@ describe('themeEditorPlugin', () => {
     expect(nextCalled).toBe(false);
     expect(response.headers['content-type']).toBe('application/javascript');
     expect(response.rawBody).toBe(CLIENT_SCRIPT_INLINE);
+    expect(response.rawBody).toContain('DomInspector');
+    expect(response.rawBody).toContain('theme-editor-overlay');
+    expect(response.rawBody).toContain('__theme_editor_overrides');
   });
 });
+
+describe('end-to-end middleware lifecycle', () => {
+  let tempDir: string;
+  let cssFile: string;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'theme-editor-e2e-'));
+    const srcDir = path.join(tempDir, 'src');
+    await fs.mkdir(srcDir, { recursive: true });
+
+    cssFile = path.join(srcDir, 'theme.css');
+    await fs.writeFile(
+      cssFile,
+      `:root {
+  --primary: #3b82f6;
+}
+[data-theme="dark"] {
+  --primary: #60a5fa;
+}
+`,
+      'utf-8'
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('completes full scan -> diff -> save -> re-scan roundtrip for multi-selector variables and insertions', async () => {
+    const middleware = createThemeEditorMiddleware(tempDir);
+
+    // 1. Initial Scan
+    const scanReq1 = createMockReq({ url: '/__theme_editor/api/scan', method: 'GET' });
+    const { res: scanRes1, getResult: getScan1 } = createMockRes();
+    await middleware(scanReq1, scanRes1, () => {});
+    const scanResult1 = await getScan1();
+
+    expect(scanResult1.statusCode).toBe(200);
+    expect(scanResult1.body.success).toBe(true);
+    expect(scanResult1.body.files).toHaveLength(1);
+    const fileMap1 = scanResult1.body.files[0];
+    expect(fileMap1.rootSelectors).toEqual([':root', '[data-theme="dark"]']);
+    expect(fileMap1.variables).toHaveLength(2);
+
+    // 2. Diff with updates and new variable insertions
+    const diffReq = createMockReq({
+      url: '/__theme_editor/api/diff',
+      method: 'POST',
+      body: {
+        filePath: 'src/theme.css',
+        updates: { '--primary': '#2563eb' },
+        newVariables: [
+          { selector: ':root', name: '--card-radius', value: '12px' },
+          { selector: '.high-contrast', name: '--contrast-border', value: '2px solid #000' }
+        ]
+      }
+    });
+    const { res: diffRes, getResult: getDiff } = createMockRes();
+    await middleware(diffReq, diffRes, () => {});
+    const diffResult = await getDiff();
+
+    expect(diffResult.statusCode).toBe(200);
+    expect(diffResult.body.success).toBe(true);
+    expect(diffResult.body.diff.unifiedDiff).toContain('+  --primary: #2563eb;');
+    expect(diffResult.body.diff.unifiedDiff).toContain('+  --card-radius: 12px;');
+    expect(diffResult.body.diff.unifiedDiff).toContain('.high-contrast');
+    expect(diffResult.body.diff.unifiedDiff).toContain('+  --contrast-border: 2px solid #000;');
+
+    // Verify disk was NOT modified during diff
+    let diskContent = await fs.readFile(cssFile, 'utf-8');
+    expect(diskContent).not.toContain('--card-radius');
+    expect(diskContent).not.toContain('.high-contrast');
+
+    // 3. Save updates and new variables to disk
+    const saveReq = createMockReq({
+      url: '/__theme_editor/api/save',
+      method: 'POST',
+      body: {
+        filePath: 'src/theme.css',
+        updates: { '--primary': '#2563eb' },
+        newVariables: [
+          { selector: ':root', name: '--card-radius', value: '12px' },
+          { selector: '.high-contrast', name: '--contrast-border', value: '2px solid #000' }
+        ]
+      }
+    });
+    const { res: saveRes, getResult: getSave } = createMockRes();
+    await middleware(saveReq, saveRes, () => {});
+    const saveResult = await getSave();
+
+    expect(saveResult.statusCode).toBe(200);
+    expect(saveResult.body.success).toBe(true);
+
+    // 4. Subsequent Scan to verify persisted state
+    const scanReq2 = createMockReq({ url: '/__theme_editor/api/scan', method: 'GET' });
+    const { res: scanRes2, getResult: getScan2 } = createMockRes();
+    await middleware(scanReq2, scanRes2, () => {});
+    const scanResult2 = await getScan2();
+
+    expect(scanResult2.statusCode).toBe(200);
+    const fileMap2 = scanResult2.body.files[0];
+    expect(fileMap2.rootSelectors).toContain(':root');
+    expect(fileMap2.rootSelectors).toContain('[data-theme="dark"]');
+    expect(fileMap2.rootSelectors).toContain('.high-contrast');
+
+    const cardRadiusVar = fileMap2.variables.find((v: any) => v.name === '--card-radius');
+    expect(cardRadiusVar).toBeDefined();
+    expect(cardRadiusVar.value).toBe('12px');
+    expect(cardRadiusVar.selector).toBe(':root');
+
+    const contrastVar = fileMap2.variables.find((v: any) => v.name === '--contrast-border');
+    expect(contrastVar).toBeDefined();
+    expect(contrastVar.value).toBe('2px solid #000');
+    expect(contrastVar.selector).toBe('.high-contrast');
+  });
+});
+

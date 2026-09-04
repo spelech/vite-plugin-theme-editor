@@ -1256,11 +1256,21 @@ describe('ThemeEditorOverlay Web Component', () => {
 });
 
 describe('bundle-inline', () => {
-  it('exports bundled client inline script', () => {
+  it('exports bundled client inline script with all core features', () => {
     expect(CLIENT_SCRIPT_INLINE).toBeDefined();
     expect(typeof CLIENT_SCRIPT_INLINE).toBe('string');
-    expect(CLIENT_SCRIPT_INLINE.length).toBeGreaterThan(100);
+    expect(CLIENT_SCRIPT_INLINE.length).toBeGreaterThan(50000);
     expect(CLIENT_SCRIPT_INLINE).toContain('theme-editor-overlay');
+    expect(CLIENT_SCRIPT_INLINE).toContain('DomInspector');
+    expect(CLIENT_SCRIPT_INLINE).toContain('theme-editor-highlight-box');
+    expect(CLIENT_SCRIPT_INLINE).toContain('theme-editor-inspector-panel');
+    expect(CLIENT_SCRIPT_INLINE).toContain('theme-editor-picker-btn');
+    expect(CLIENT_SCRIPT_INLINE).toContain('__theme_editor_overrides');
+    expect(CLIENT_SCRIPT_INLINE).toContain('rootSelectors');
+    expect(CLIENT_SCRIPT_INLINE).toContain('selectedSelector');
+    expect(CLIENT_SCRIPT_INLINE).toContain('stagedNewVariables');
+    expect(CLIENT_SCRIPT_INLINE).toContain('extractStyles');
+    expect(CLIENT_SCRIPT_INLINE).toContain('findAffectedElements');
   });
 });
 
@@ -1604,5 +1614,149 @@ describe('DomInspector', () => {
 
       expect(dom.mockDocument.body.querySelectorAll('.theme-editor-highlight-box').length).toBe(0);
     });
+  });
+});
+
+describe('End-to-End Client Workflow', () => {
+  let dom: ReturnType<typeof setupGlobalDomMocks>;
+
+  beforeEach(() => {
+    dom = setupGlobalDomMocks();
+  });
+
+  it('completes the full flow: picker -> style extraction -> new variable staging -> diff modal -> save', async () => {
+    const fetchMock = vi.fn();
+    (global as any).fetch = fetchMock;
+
+    // 1. Initial scan data
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme.css',
+            relativePath: 'src/theme.css',
+            rootSelectors: [':root', '[data-theme="dark"]'],
+            variables: [
+              { name: '--primary', value: '#3b82f6', inferredType: 'color', selector: ':root' },
+              { name: '--bg', value: '#1e293b', inferredType: 'color', selector: '[data-theme="dark"]' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    expect(overlay.files).toHaveLength(1);
+    expect(overlay.selectedSelector).toBe('all');
+
+    // 2. Open drawer and activate inspector picker
+    overlay.openDrawer();
+    expect(overlay.isOpen).toBe(true);
+
+    const pickerBtn = (overlay as any).pickerBtnEl;
+    expect(pickerBtn).toBeDefined();
+    pickerBtn.dispatchEvent({ type: 'click' });
+    expect((overlay as any).isInspectorActive).toBe(true);
+    expect(pickerBtn.classList.contains('is-active')).toBe(true);
+    expect(dom.mockDocument.body.style.cursor).toBe('crosshair');
+
+    // 3. Inspect a mock DOM button element
+    const btnTarget = createMockElement('button');
+    btnTarget.className = 'btn-primary';
+    btnTarget.style.backgroundColor = '#10b981';
+    btnTarget.style.color = '#ffffff';
+    btnTarget.style.borderRadius = '8px';
+    dom.mockDocument.body.appendChild(btnTarget);
+
+    dom.mockDocument.elementsFromPoint = vi.fn().mockReturnValue([btnTarget]);
+    dom.mockDocument.elementFromPoint = vi.fn().mockReturnValue(btnTarget);
+
+    const clickEvent = {
+      type: 'click',
+      clientX: 50,
+      clientY: 50,
+      target: btnTarget,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn()
+    };
+    dom.mockDocument.dispatchEvent(clickEvent);
+
+    // Inspector is deactivated and inspector view is rendered in drawer
+    expect((overlay as any).isInspectorActive).toBe(false);
+    expect((overlay as any).inspectedElement).toBe(btnTarget);
+
+    const inspectorPanel = (overlay as any).inspectorPanelEl;
+    expect(inspectorPanel).toBeDefined();
+    expect(inspectorPanel.style.display).toBe('flex');
+
+    // 4. Stage a new variable from extracted style: stage --button-radius = 8px
+    overlay.stageNewVariable({ selector: ':root', name: '--button-radius', value: '8px' });
+    expect(overlay.stagedNewVariables['/root/src/theme.css']).toEqual([
+      { selector: ':root', name: '--button-radius', value: '8px' }
+    ]);
+    expect(overlay.getStagedCount('/root/src/theme.css')).toBe(1);
+
+    // Also stage an update to existing --primary variable
+    overlay.updateVariable('--primary', '#2563eb', ':root');
+    expect(overlay.getStagedCount('/root/src/theme.css')).toBe(2);
+
+    // 5. Open diff modal and verify diff payload
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        success: true,
+        diff: {
+          filePath: 'src/theme.css',
+          original: ':root {\n  --primary: #3b82f6;\n}\n',
+          modified: ':root {\n  --primary: #2563eb;\n  --button-radius: 8px;\n}\n',
+          unifiedDiff: '--- src/theme.css\n+++ src/theme.css\n@@ -1,3 +1,4 @@\n :root {\n-  --primary: #3b82f6;\n+  --primary: #2563eb;\n+  --button-radius: 8px;\n }\n',
+          changesCount: 2
+        }
+      })
+    });
+
+    await overlay.openDiffModal();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/__theme_editor/api/diff',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filePath: '/root/src/theme.css',
+          updates: { '--primary': '#2563eb' },
+          newVariables: [{ selector: ':root', name: '--button-radius', value: '8px' }]
+        })
+      })
+    );
+
+    // 6. Save changes
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ success: true, message: 'Styles written to disk' })
+    });
+
+    await overlay.saveChanges();
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/__theme_editor/api/save',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filePath: '/root/src/theme.css',
+          updates: { '--primary': '#2563eb' },
+          newVariables: [{ selector: ':root', name: '--button-radius', value: '8px' }]
+        })
+      })
+    );
+
+    // After saving, staged state is cleared and original values updated
+    expect(overlay.stagedNewVariables['/root/src/theme.css']).toEqual([]);
+    expect(overlay.originalValues['/root/src/theme.css']['--primary']).toBe('#2563eb');
+    expect(overlay.getStagedCount('/root/src/theme.css')).toBe(0);
   });
 });
