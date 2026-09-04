@@ -52,6 +52,12 @@ function createMockElement(tagName: string = 'div'): any {
     step: '',
     placeholder: '',
     title: '',
+    get id() {
+      return attributes['id'] || '';
+    },
+    set id(val: string) {
+      attributes['id'] = val || '';
+    },
     disabled: false,
     attachShadow: (opts: { mode: string }) => {
       const shadowRoot = createMockElement('shadow-root');
@@ -70,6 +76,7 @@ function createMockElement(tagName: string = 'div'): any {
     matches: (sel: string) => {
       if (sel === '*') return true;
       if (sel.startsWith('.')) return classListSet.has(sel.slice(1));
+      if (sel.startsWith('#')) return (el.id === sel.slice(1) || attributes['id'] === sel.slice(1));
       if (sel.toUpperCase() === el.tagName) return true;
       if (sel.startsWith('[') && sel.endsWith(']')) {
         const parts = sel.slice(1, -1).split('=');
@@ -232,13 +239,20 @@ function setupGlobalDomMocks() {
   };
   docEl.style.getPropertyValue = (name: string) => rootStyle[name] || '';
 
+  const headEl = createMockElement('head');
   const bodyEl = createMockElement('body');
+  docEl.appendChild(headEl);
+  docEl.appendChild(bodyEl);
   const docListeners: Record<string, Function[]> = {};
   const mockDocument: any = {
     createElement: (tag: string) => createMockElement(tag),
     documentElement: docEl,
+    head: headEl,
     body: bodyEl,
     styleSheets: [],
+    getElementById: vi.fn((id: string) => {
+      return docEl.querySelector?.('#' + id) || bodyEl.querySelector?.('#' + id) || headEl.querySelector?.('#' + id) || null;
+    }),
     addEventListener: vi.fn((event: string, fn: Function) => {
       if (!docListeners[event]) docListeners[event] = [];
       docListeners[event].push(fn);
@@ -736,6 +750,306 @@ describe('ThemeEditorOverlay Web Component', () => {
 
     initClient();
     expect(dom.mockCustomElements.define).toHaveBeenCalled();
+  });
+
+  it('filters variables by root selector dropdown', async () => {
+    (global as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme.css',
+            relativePath: 'src/theme.css',
+            rootSelectors: [':root', '[data-theme="dark"]'],
+            variables: [
+              { name: '--color-primary', value: '#3b82f6', inferredType: 'color', selector: ':root' },
+              { name: '--color-dark-bg', value: '#111827', inferredType: 'color', selector: '[data-theme="dark"]' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    const selectorSelect = (overlay as any).selectorSelectEl as HTMLSelectElement;
+    expect(selectorSelect).toBeDefined();
+    expect(selectorSelect.children.length).toBe(3); // 'all', ':root', '[data-theme="dark"]'
+
+    // Default 'all' shows both
+    let cards = (overlay as any).listContainerEl.querySelectorAll('.theme-editor-item');
+    expect(cards.length).toBe(2);
+
+    // Switch to '[data-theme="dark"]'
+    overlay.selectedSelector = '[data-theme="dark"]';
+    selectorSelect.value = '[data-theme="dark"]';
+    (overlay as any).renderList();
+
+    cards = (overlay as any).listContainerEl.querySelectorAll('.theme-editor-item');
+    expect(cards.length).toBe(1);
+    expect(cards[0].getAttribute('data-variable-name')).toBe('--color-dark-bg');
+  });
+
+  it('handles live scoped updates using ephemeral <style id="__theme_editor_overrides"> for non-root selectors', async () => {
+    (global as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme.css',
+            relativePath: 'src/theme.css',
+            rootSelectors: [':root', '[data-theme="dark"]'],
+            variables: [
+              { name: '--color-primary', value: '#3b82f6', inferredType: 'color', selector: ':root' },
+              { name: '--color-dark-bg', value: '#111827', inferredType: 'color', selector: '[data-theme="dark"]' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    // Root update -> document.documentElement.style.setProperty
+    overlay.updateVariable('--color-primary', '#ef4444');
+    expect(dom.rootStyle['--color-primary']).toBe('#ef4444');
+
+    // Scoped update -> ephemeral style tag injection
+    overlay.updateVariable('--color-dark-bg', '#000000');
+    expect(dom.rootStyle['--color-dark-bg']).toBeUndefined();
+
+    const styleEl = (dom.mockDocument.getElementById ? dom.mockDocument.getElementById('__theme_editor_overrides') : dom.mockDocument.querySelector('#__theme_editor_overrides'));
+    expect(styleEl).toBeDefined();
+    expect(styleEl.textContent).toContain('[data-theme="dark"]');
+    expect(styleEl.textContent).toContain('--color-dark-bg: #000000;');
+
+    // Reset variable clears or updates overrides style
+    overlay.resetVariable('--color-dark-bg');
+    expect(styleEl.textContent).not.toContain('--color-dark-bg: #000000;');
+  });
+
+  it('highlights affected elements on card hover and displays affected count badge', async () => {
+    const targetBtn = createMockElement('button');
+    targetBtn.setAttribute('style', 'color: var(--color-primary);');
+    dom.mockDocument.body.appendChild(targetBtn);
+
+    (global as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme.css',
+            relativePath: 'src/theme.css',
+            rootSelectors: [':root'],
+            variables: [
+              { name: '--color-primary', value: '#3b82f6', inferredType: 'color', selector: ':root' },
+              { name: '--unused-var', value: '10px', inferredType: 'dimension', selector: ':root' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    const cardPrimary = (overlay as any).listContainerEl.querySelector('[data-variable-name="--color-primary"]');
+    const cardUnused = (overlay as any).listContainerEl.querySelector('[data-variable-name="--unused-var"]');
+
+    // Badge check
+    const badgePrimary = cardPrimary.querySelector('.theme-editor-affected-badge');
+    expect(badgePrimary).toBeDefined();
+    expect(badgePrimary.textContent).toContain('1');
+
+    const badgeUnused = cardUnused.querySelector('.theme-editor-affected-badge');
+    expect(badgeUnused).toBeNull();
+
+    // Hover cardPrimary -> triggers highlight
+    cardPrimary.dispatchEvent({ type: 'mouseenter' });
+    const boxes = overlay.shadow.querySelectorAll('.theme-editor-highlight-box');
+    expect(boxes.length).toBe(1);
+
+    // Mouseleave -> clears highlights
+    cardPrimary.dispatchEvent({ type: 'mouseleave' });
+    expect(overlay.shadow.querySelectorAll('.theme-editor-highlight-box').length).toBe(0);
+  });
+
+  it('toggles picker mode and opens inspector drawer view when an element is picked', async () => {
+    const target = createMockElement('button');
+    target.style.color = '#3b82f6';
+    target.style.borderRadius = '8px';
+    dom.mockDocument.body.appendChild(target);
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    const pickerBtn = (overlay as any).pickerBtnEl;
+    expect(pickerBtn).toBeDefined();
+
+    // Toggle picker on
+    pickerBtn.dispatchEvent({ type: 'click' });
+    expect((overlay as any).isInspectorActive).toBe(true);
+    expect(pickerBtn.classList.contains('is-active')).toBe(true);
+
+    // Pick element
+    (overlay as any).onElementPicked(target, (overlay as any).inspector.extractStyles(target));
+
+    expect((overlay as any).isInspectorActive).toBe(false);
+    expect(pickerBtn.classList.contains('is-active')).toBe(false);
+    expect(overlay.isOpen).toBe(true);
+
+    const panel = (overlay as any).inspectorPanelEl;
+    expect(panel.style.display).not.toBe('none');
+    expect(panel.querySelector('.theme-editor-inspector-element-tag').textContent).toBe('button');
+
+    // Back button restores list view
+    const backBtn = panel.querySelector('.theme-editor-inspector-back-btn');
+    backBtn.dispatchEvent({ type: 'click' });
+    expect(panel.style.display).toBe('none');
+  });
+
+  it('allows binding inspected property to an existing variable and extracting to a new staged variable', async () => {
+    (global as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme.css',
+            relativePath: 'src/theme.css',
+            rootSelectors: [':root'],
+            variables: [
+              { name: '--color-primary', value: '#3b82f6', inferredType: 'color', selector: ':root' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const target = createMockElement('div');
+    target.style.color = 'rgb(59, 130, 246)';
+    target.style.borderRadius = '12px';
+    dom.mockDocument.body.appendChild(target);
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    overlay.showInspectorView(target);
+    const panel = (overlay as any).inspectorPanelEl;
+
+    // 1. Bind color to --color-primary
+    const colorItem = panel.querySelector('[data-property="color"]');
+    const bindSelect = colorItem.querySelector('.theme-editor-inspector-bind-select');
+    bindSelect.value = '--color-primary';
+    bindSelect.dispatchEvent({ type: 'change' });
+
+    expect(target.style.color).toBe('var(--color-primary)');
+
+    // 2. Extract borderRadius to new variable
+    const radiusItem = panel.querySelector('[data-property="borderRadius"]');
+    const extractBtn = radiusItem.querySelector('.theme-editor-inspector-extract-btn');
+    extractBtn.dispatchEvent({ type: 'click' });
+
+    const form = radiusItem.querySelector('.theme-editor-inspector-extract-form');
+    expect(form).toBeDefined();
+
+    const nameInput = form.querySelector('.theme-editor-var-name-input');
+    nameInput.value = '--card-radius';
+    const stageBtn = form.querySelector('.theme-editor-stage-var-btn');
+    stageBtn.dispatchEvent({ type: 'click' });
+
+    expect(overlay.stagedNewVariables['/root/src/theme.css']).toHaveLength(1);
+    expect(overlay.stagedNewVariables['/root/src/theme.css'][0]).toEqual({
+      selector: ':root',
+      name: '--card-radius',
+      value: '12px'
+    });
+    expect(overlay.getStagedCount('/root/src/theme.css')).toBe(1);
+    expect(dom.rootStyle['--card-radius']).toBe('12px');
+  });
+
+  it('includes staged newVariables in diff and save API requests', async () => {
+    let diffRequestBody: any = null;
+    let saveRequestBody: any = null;
+
+    (global as any).fetch = vi.fn((url: string, opts?: any) => {
+      if (url === '/__theme_editor/api/scan') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            files: [
+              {
+                filePath: '/root/src/theme.css',
+                relativePath: 'src/theme.css',
+                rootSelectors: [':root'],
+                variables: [{ name: '--color-primary', value: '#3b82f6', inferredType: 'color', selector: ':root' }]
+              }
+            ]
+          })
+        });
+      }
+      if (url === '/__theme_editor/api/diff') {
+        diffRequestBody = JSON.parse(opts.body);
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            success: true,
+            diff: {
+              filePath: '/root/src/theme.css',
+              original: '',
+              modified: '',
+              unifiedDiff: '+  --new-var: 10px;',
+              changesCount: 1
+            }
+          })
+        });
+      }
+      if (url === '/__theme_editor/api/save') {
+        saveRequestBody = JSON.parse(opts.body);
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ success: true, message: 'Saved' })
+        });
+      }
+      return Promise.reject(new Error(`Unexpected url: ${url}`));
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    overlay.stageNewVariable({
+      selector: ':root',
+      name: '--new-var',
+      value: '10px'
+    });
+
+    // Diff request includes newVariables
+    await overlay.openDiffModal();
+    expect(diffRequestBody).toBeDefined();
+    expect(diffRequestBody.newVariables).toEqual([
+      { selector: ':root', name: '--new-var', value: '10px' }
+    ]);
+
+    // Save request includes newVariables
+    await overlay.saveChanges();
+    expect(saveRequestBody).toBeDefined();
+    expect(saveRequestBody.newVariables).toEqual([
+      { selector: ':root', name: '--new-var', value: '10px' }
+    ]);
+    expect(overlay.stagedNewVariables['/root/src/theme.css']).toEqual([]);
+    expect(overlay.originalValues['/root/src/theme.css']['--new-var']).toBe('10px');
   });
 });
 
