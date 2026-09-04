@@ -79,10 +79,28 @@ function createMockElement(tagName: string = 'div'): any {
       if (sel.startsWith('#')) return (el.id === sel.slice(1) || attributes['id'] === sel.slice(1));
       if (sel.toUpperCase() === el.tagName) return true;
       if (sel.startsWith('[') && sel.endsWith(']')) {
-        const parts = sel.slice(1, -1).split('=');
-        const attr = parts[0];
-        const val = parts[1]?.replace(/^['"]|['"]$/g, '');
-        return val !== undefined ? attributes[attr] === val : attr in attributes;
+        const attrRegex = /\[([a-zA-Z0-9_-]+)(?:=(?:"((?:\\"|[^"])*)"|'((?:\\'|[^'])*)'|([^\]]*)))?\]/g;
+        let match;
+        let matchedAny = false;
+        let allMatch = true;
+        while ((match = attrRegex.exec(sel)) !== null) {
+          matchedAny = true;
+          const attr = match[1];
+          const rawVal = match[2] ?? match[3] ?? match[4];
+          if (rawVal !== undefined) {
+            const val = rawVal.replace(/\\(["'])/g, '$1');
+            if (attributes[attr] !== val) {
+              allMatch = false;
+              break;
+            }
+          } else {
+            if (!(attr in attributes)) {
+              allMatch = false;
+              break;
+            }
+          }
+        }
+        if (matchedAny) return allMatch;
       }
       return false;
     },
@@ -1050,6 +1068,190 @@ describe('ThemeEditorOverlay Web Component', () => {
     ]);
     expect(overlay.stagedNewVariables['/root/src/theme.css']).toEqual([]);
     expect(overlay.originalValues['/root/src/theme.css']['--new-var']).toBe('10px');
+  });
+
+  it('resets selectedSelector to all if new file does not contain active selector when switching files', async () => {
+    (global as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme1.css',
+            relativePath: 'src/theme1.css',
+            rootSelectors: [':root', '[data-theme="dark"]'],
+            variables: [
+              { name: '--color-primary', value: '#3b82f6', inferredType: 'color', selector: ':root' },
+              { name: '--color-dark', value: '#111', inferredType: 'color', selector: '[data-theme="dark"]' }
+            ]
+          },
+          {
+            filePath: '/root/src/theme2.css',
+            relativePath: 'src/theme2.css',
+            rootSelectors: [':root'],
+            variables: [
+              { name: '--color-base', value: '#fff', inferredType: 'color', selector: ':root' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    overlay.selectedSelector = '[data-theme="dark"]';
+    expect(overlay.selectedSelector).toBe('[data-theme="dark"]');
+
+    // Switch to theme2.css which lacks '[data-theme="dark"]'
+    overlay.setSelectedFile('/root/src/theme2.css');
+    expect(overlay.selectedSelector).toBe('all');
+  });
+
+  it('cleans up scopedOverrides and ephemeral style element when resetting scoped variables', async () => {
+    (global as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme.css',
+            relativePath: 'src/theme.css',
+            rootSelectors: [':root', '[data-theme="dark"]'],
+            variables: [
+              { name: '--color-dark-bg', value: '#111827', inferredType: 'color', selector: '[data-theme="dark"]' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    overlay.updateVariable('--color-dark-bg', '#000000');
+    expect((overlay as any).scopedOverrides['[data-theme="dark"]']).toBeDefined();
+
+    overlay.resetVariable('--color-dark-bg');
+    expect((overlay as any).scopedOverrides['[data-theme="dark"]']).toBeUndefined();
+
+    const styleEl = dom.mockDocument.getElementById('__theme_editor_overrides');
+    expect(!styleEl || styleEl.textContent === '').toBe(true);
+  });
+
+  it('only cleans up scopedOverrides for the target file in resetAll', async () => {
+    (global as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme1.css',
+            relativePath: 'src/theme1.css',
+            rootSelectors: ['[data-theme="dark"]'],
+            variables: [
+              { name: '--dark-1', value: '#111', inferredType: 'color', selector: '[data-theme="dark"]' }
+            ]
+          },
+          {
+            filePath: '/root/src/theme2.css',
+            relativePath: 'src/theme2.css',
+            rootSelectors: ['[data-theme="neon"]'],
+            variables: [
+              { name: '--neon-1', value: '#0f0', inferredType: 'color', selector: '[data-theme="neon"]' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    // Stage changes in theme1.css
+    overlay.setSelectedFile('/root/src/theme1.css');
+    overlay.updateVariable('--dark-1', '#000');
+
+    // Stage changes in theme2.css
+    overlay.setSelectedFile('/root/src/theme2.css');
+    overlay.updateVariable('--neon-1', '#0ff');
+
+    expect((overlay as any).scopedOverrides['[data-theme="dark"]']).toBeDefined();
+    expect((overlay as any).scopedOverrides['[data-theme="neon"]']).toBeDefined();
+
+    // Reset only theme1.css
+    overlay.resetAll('/root/src/theme1.css');
+    expect((overlay as any).scopedOverrides['[data-theme="dark"]']).toBeUndefined();
+    expect((overlay as any).scopedOverrides['[data-theme="neon"]']).toBeDefined();
+    expect((overlay as any).scopedOverrides['[data-theme="neon"]']['--neon-1']).toBe('#0ff');
+  });
+
+  it('sets data-selector on variable cards and targets specific card in updateItemModifiedState', async () => {
+    (global as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme.css',
+            relativePath: 'src/theme.css',
+            rootSelectors: [':root', '[data-theme="dark"]'],
+            variables: [
+              { name: '--primary', value: '#3b82f6', inferredType: 'color', selector: ':root' },
+              { name: '--primary', value: '#1d4ed8', inferredType: 'color', selector: '[data-theme="dark"]' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    const rootCard = (overlay as any).listContainerEl.querySelector('[data-variable-name="--primary"][data-selector=":root"]');
+    const darkCard = (overlay as any).listContainerEl.querySelector('[data-variable-name="--primary"][data-selector="[data-theme=\\"dark\\"]"]');
+
+    expect(rootCard).toBeDefined();
+    expect(darkCard).toBeDefined();
+
+    // Update only the dark card variable
+    overlay.updateVariable('--primary', '#9333ea', '[data-theme="dark"]');
+
+    expect(darkCard.classList.contains('is-modified')).toBe(true);
+    expect(rootCard.classList.contains('is-modified')).toBe(false);
+  });
+
+  it('removes __theme_editor_overrides style tag on disconnectedCallback', async () => {
+    (global as any).fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        success: true,
+        files: [
+          {
+            filePath: '/root/src/theme.css',
+            relativePath: 'src/theme.css',
+            rootSelectors: ['[data-theme="dark"]'],
+            variables: [
+              { name: '--color-dark-bg', value: '#111827', inferredType: 'color', selector: '[data-theme="dark"]' }
+            ]
+          }
+        ]
+      })
+    });
+
+    const overlay = new ThemeEditorOverlay();
+    overlay.connectedCallback();
+    await (overlay as any).loadScanData();
+
+    overlay.updateVariable('--color-dark-bg', '#000000');
+    expect(dom.mockDocument.getElementById('__theme_editor_overrides')).toBeDefined();
+
+    overlay.disconnectedCallback();
+    expect(dom.mockDocument.getElementById('__theme_editor_overrides')).toBeNull();
   });
 });
 

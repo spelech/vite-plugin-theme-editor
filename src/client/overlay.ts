@@ -151,6 +151,19 @@ export class ThemeEditorOverlay extends BaseElement {
       window.removeEventListener("keydown", this.handleKeydown);
     }
     this.disablePicker();
+
+    if (typeof document !== "undefined") {
+      const styleEl = (typeof document.getElementById === "function"
+        ? document.getElementById("__theme_editor_overrides")
+        : document.querySelector?.("#__theme_editor_overrides")) as HTMLElement | null;
+      if (styleEl) {
+        if (typeof styleEl.remove === "function") {
+          styleEl.remove();
+        } else if (styleEl.parentElement) {
+          styleEl.parentElement.removeChild(styleEl);
+        }
+      }
+    }
   }
 
   private buildBaseDOM(): void {
@@ -750,6 +763,26 @@ export class ThemeEditorOverlay extends BaseElement {
   public setSelectedFile(filePath: string): void {
     this.selectedFilePath = filePath;
     this.fileSelectEl.value = filePath;
+
+    const activeFile = this.files.find(f => f.filePath === filePath);
+    const validSelectors = new Set<string>(["all"]);
+    if (activeFile?.rootSelectors) {
+      activeFile.rootSelectors.forEach(s => validSelectors.add(s));
+    }
+    if (activeFile?.variables) {
+      activeFile.variables.forEach(v => {
+        if (v.selector) validSelectors.add(v.selector);
+      });
+    }
+    const newVars = this.stagedNewVariables[filePath] || [];
+    newVars.forEach(nv => {
+      if (nv.selector) validSelectors.add(nv.selector);
+    });
+
+    if (!validSelectors.has(this.selectedSelector)) {
+      this.selectedSelector = "all";
+    }
+
     this.renderSelectorSelect();
     this.renderFilterTabs();
     this.renderList();
@@ -797,13 +830,16 @@ export class ThemeEditorOverlay extends BaseElement {
       if (!isRootSelector(targetSelector)) {
         if (this.scopedOverrides[targetSelector]) {
           delete this.scopedOverrides[targetSelector][varName];
+          if (Object.keys(this.scopedOverrides[targetSelector]).length === 0) {
+            delete this.scopedOverrides[targetSelector];
+          }
           this.applyScopedOverrides();
         }
       }
     }
 
     this.updateFooter();
-    this.updateItemModifiedState(varName);
+    this.updateItemModifiedState(varName, targetSelector);
   }
 
   private applyScopedOverrides(): void {
@@ -842,12 +878,17 @@ export class ThemeEditorOverlay extends BaseElement {
     }
   }
 
-  public resetVariable(varName: string): void {
+  public resetVariable(varName: string, selector?: string): void {
     if (!this.selectedFilePath) return;
 
     const activeFile = this.files.find(f => f.filePath === this.selectedFilePath);
-    const matchingVar = activeFile?.variables.find(v => v.name === varName);
-    let targetSelector = matchingVar?.selector;
+    let targetSelector = selector;
+    if (!targetSelector) {
+      const matchingVar = activeFile?.variables.find(v =>
+        v.name === varName && (this.selectedSelector === "all" || v.selector === this.selectedSelector)
+      ) || activeFile?.variables.find(v => v.name === varName);
+      targetSelector = matchingVar?.selector;
+    }
     if (!targetSelector) {
       const stagedNew = (this.stagedNewVariables[this.selectedFilePath] || []).find(v => v.name === varName);
       targetSelector = stagedNew?.selector || ":root";
@@ -861,17 +902,13 @@ export class ThemeEditorOverlay extends BaseElement {
         document.documentElement.style.removeProperty(varName);
       }
     } else {
-      if (orig !== undefined) {
-        if (!this.scopedOverrides[targetSelector]) {
-          this.scopedOverrides[targetSelector] = {};
+      if (this.scopedOverrides[targetSelector]) {
+        delete this.scopedOverrides[targetSelector][varName];
+        if (Object.keys(this.scopedOverrides[targetSelector]).length === 0) {
+          delete this.scopedOverrides[targetSelector];
         }
-        this.scopedOverrides[targetSelector][varName] = orig;
-      } else {
-        if (this.scopedOverrides[targetSelector]) {
-          delete this.scopedOverrides[targetSelector][varName];
-        }
+        this.applyScopedOverrides();
       }
-      this.applyScopedOverrides();
     }
 
     if (this.stagedValues[this.selectedFilePath]) {
@@ -895,10 +932,10 @@ export class ThemeEditorOverlay extends BaseElement {
 
     const staged = this.stagedValues[targetFile] || {};
     const keys = Object.keys(staged);
+    const activeFile = this.files.find(f => f.filePath === targetFile);
 
     for (const key of keys) {
       const orig = this.originalValues[targetFile]?.[key];
-      const activeFile = this.files.find(f => f.filePath === targetFile);
       const targetSelector = activeFile?.variables.find(v => v.name === key)?.selector || ":root";
 
       if (isRootSelector(targetSelector)) {
@@ -907,6 +944,13 @@ export class ThemeEditorOverlay extends BaseElement {
         } else {
           document.documentElement.style.removeProperty(key);
         }
+      } else {
+        if (this.scopedOverrides[targetSelector]) {
+          delete this.scopedOverrides[targetSelector][key];
+          if (Object.keys(this.scopedOverrides[targetSelector]).length === 0) {
+            delete this.scopedOverrides[targetSelector];
+          }
+        }
       }
     }
 
@@ -914,12 +958,18 @@ export class ThemeEditorOverlay extends BaseElement {
       for (const newVar of this.stagedNewVariables[targetFile]) {
         if (isRootSelector(newVar.selector)) {
           document.documentElement.style.removeProperty(newVar.name);
+        } else {
+          if (this.scopedOverrides[newVar.selector]) {
+            delete this.scopedOverrides[newVar.selector][newVar.name];
+            if (Object.keys(this.scopedOverrides[newVar.selector]).length === 0) {
+              delete this.scopedOverrides[newVar.selector];
+            }
+          }
         }
       }
       this.stagedNewVariables[targetFile] = [];
     }
 
-    this.scopedOverrides = {};
     this.applyScopedOverrides();
 
     this.stagedValues[targetFile] = {};
@@ -1229,6 +1279,7 @@ export class ThemeEditorOverlay extends BaseElement {
       const card = document.createElement("div");
       card.className = `theme-editor-item ${isModified ? "is-modified" : ""}`;
       card.setAttribute("data-variable-name", v.name);
+      card.setAttribute("data-selector", v.selector || ":root");
 
       // Header
       const itemHeader = document.createElement("div");
@@ -1283,7 +1334,7 @@ export class ThemeEditorOverlay extends BaseElement {
         resetBtn.className = "theme-editor-reset-btn";
         resetBtn.innerHTML = "&#8634; Reset";
         resetBtn.title = `Revert to ${this.originalValues[this.selectedFilePath]?.[v.name]}`;
-        resetBtn.addEventListener("click", () => this.resetVariable(v.name));
+        resetBtn.addEventListener("click", () => this.resetVariable(v.name, v.selector));
         actions.appendChild(resetBtn);
       }
 
@@ -1301,9 +1352,15 @@ export class ThemeEditorOverlay extends BaseElement {
     }
   }
 
-  private updateItemModifiedState(varName: string): void {
-    const card = this.listContainerEl.querySelector(`[data-variable-name="${varName}"]`);
+  private updateItemModifiedState(varName: string, selector?: string): void {
+    let selectorQuery = `[data-variable-name="${varName}"]`;
+    if (selector) {
+      const escapedSelector = selector.replace(/"/g, '\\"');
+      selectorQuery += `[data-selector="${escapedSelector}"]`;
+    }
+    const card = this.listContainerEl.querySelector(selectorQuery);
     if (!card) return;
+    const cardSelector = card.getAttribute("data-selector") || selector;
 
     const isModified = this.stagedValues[this.selectedFilePath]?.[varName] !== undefined;
     card.classList.toggle("is-modified", isModified);
@@ -1317,7 +1374,7 @@ export class ThemeEditorOverlay extends BaseElement {
         resetBtn.className = "theme-editor-reset-btn";
         resetBtn.innerHTML = "&#8634; Reset";
         resetBtn.title = `Revert to ${this.originalValues[this.selectedFilePath]?.[varName]}`;
-        resetBtn.addEventListener("click", () => this.resetVariable(varName));
+        resetBtn.addEventListener("click", () => this.resetVariable(varName, cardSelector || undefined));
         actionsEl.appendChild(resetBtn);
       }
     }
