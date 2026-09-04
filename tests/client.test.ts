@@ -12,6 +12,7 @@ import {
 } from '../src/client/controls';
 import { createDiffModal } from '../src/client/diff-modal';
 import { ThemeEditorOverlay, registerThemeEditorOverlay } from '../src/client/overlay';
+import { DomInspector } from '../src/client/inspector';
 import { initClient } from '../src/client/index';
 import { CLIENT_SCRIPT_INLINE } from '../src/client/bundle-inline';
 import type { ThemeVariable, DiffResult } from '../src/types';
@@ -58,8 +59,57 @@ function createMockElement(tagName: string = 'div'): any {
       el.shadowRoot = shadowRoot;
       return shadowRoot;
     },
+    getBoundingClientRect: () => ({
+      top: 10,
+      left: 20,
+      width: 100,
+      height: 50,
+      bottom: 60,
+      right: 120
+    }),
+    matches: (sel: string) => {
+      if (sel === '*') return true;
+      if (sel.startsWith('.')) return classListSet.has(sel.slice(1));
+      if (sel.toUpperCase() === el.tagName) return true;
+      if (sel.startsWith('[') && sel.endsWith(']')) {
+        const parts = sel.slice(1, -1).split('=');
+        const attr = parts[0];
+        const val = parts[1]?.replace(/^['"]|['"]$/g, '');
+        return val !== undefined ? attributes[attr] === val : attr in attributes;
+      }
+      return false;
+    },
+    closest: (sel: string) => {
+      let cur: any = el;
+      while (cur) {
+        if (cur.matches && cur.matches(sel)) return cur;
+        cur = cur.parentElement;
+      }
+      return null;
+    },
     style: new Proxy(styleObj, {
-      get: (target, prop: string) => target[prop] || '',
+      get: (target, prop: string) => {
+        if (prop in target) {
+          return target[prop];
+        }
+        if (prop === 'setProperty') {
+          return (name: string, val: string) => {
+            target[name] = val;
+          };
+        }
+        if (prop === 'getPropertyValue') {
+          return (name: string) => target[name] || '';
+        }
+        if (prop === 'removeProperty') {
+          return (name: string) => {
+            delete target[name];
+          };
+        }
+        if (prop === 'cssText') {
+          return Object.entries(target).map(([k, v]) => `${k}: ${v};`).join(' ');
+        }
+        return target[prop] || '';
+      },
       set: (target, prop: string, val: string) => {
         target[prop] = val;
         return true;
@@ -128,6 +178,9 @@ function createMockElement(tagName: string = 'div'): any {
       const find = (node: any): any => {
         if (!node || !node.children) return null;
         for (const c of node.children) {
+          if (c.matches && c.matches(selector)) {
+            return c;
+          }
           if (selector.startsWith('.') && c.classList.contains(selector.slice(1))) {
             return c;
           }
@@ -149,7 +202,11 @@ function createMockElement(tagName: string = 'div'): any {
       const find = (node: any) => {
         if (!node || !node.children) return;
         for (const c of node.children) {
-          if (selector.startsWith('.') && c.classList.contains(selector.slice(1))) {
+          if (c.matches && c.matches(selector)) {
+            results.push(c);
+          } else if (selector.startsWith('.') && c.classList.contains(selector.slice(1))) {
+            results.push(c);
+          } else if (selector === '*' || (c.tagName && c.tagName === selector.toUpperCase())) {
             results.push(c);
           }
           find(c);
@@ -176,16 +233,39 @@ function setupGlobalDomMocks() {
   docEl.style.getPropertyValue = (name: string) => rootStyle[name] || '';
 
   const bodyEl = createMockElement('body');
+  const docListeners: Record<string, Function[]> = {};
   const mockDocument: any = {
     createElement: (tag: string) => createMockElement(tag),
     documentElement: docEl,
     body: bodyEl,
-    addEventListener: vi.fn(),
-    removeEventListener: vi.fn(),
+    styleSheets: [],
+    addEventListener: vi.fn((event: string, fn: Function) => {
+      if (!docListeners[event]) docListeners[event] = [];
+      docListeners[event].push(fn);
+    }),
+    removeEventListener: vi.fn((event: string, fn: Function) => {
+      if (docListeners[event]) {
+        docListeners[event] = docListeners[event].filter(f => f !== fn);
+      }
+    }),
+    dispatchEvent: (eventObj: any) => {
+      const type = eventObj.type || eventObj;
+      if (docListeners[type]) {
+        docListeners[type].forEach(fn => fn(eventObj));
+      }
+    },
     querySelector: vi.fn((sel: string) => {
       if (sel === 'theme-editor-overlay') return null;
-      return null;
+      return bodyEl.querySelector(sel) || docEl.querySelector(sel);
     }),
+    querySelectorAll: vi.fn((sel: string) => {
+      const fromDoc = docEl.querySelectorAll(sel);
+      const fromBody = bodyEl.querySelectorAll(sel);
+      const set = new Set([...fromDoc, ...fromBody]);
+      return Array.from(set);
+    }),
+    elementFromPoint: vi.fn((_x: number, _y: number) => null),
+    elementsFromPoint: vi.fn((_x: number, _y: number) => []),
     readyState: 'complete'
   };
 
@@ -199,6 +279,17 @@ function setupGlobalDomMocks() {
 
   (global as any).document = mockDocument;
   (global as any).window = global;
+  (global as any).window.getComputedStyle = vi.fn((element: any) => {
+    return {
+      getPropertyValue: (prop: string) => {
+        if (element && element.style && typeof element.style.getPropertyValue === 'function') {
+          return element.style.getPropertyValue(prop) || element.style[prop] || '';
+        }
+        return (element && element.style && element.style[prop]) || '';
+      },
+      ...element?.style
+    };
+  });
   (global as any).customElements = mockCustomElements;
   (global as any).HTMLElement = class MockHTMLElement {
     public attachShadow(opts: { mode: string }) {
@@ -235,6 +326,8 @@ describe('styles', () => {
     expect(OVERLAY_STYLES).toContain('.diff-addition');
     expect(OVERLAY_STYLES).toContain('.diff-deletion');
     expect(OVERLAY_STYLES).toContain('.theme-editor-toast');
+    expect(OVERLAY_STYLES).toContain('.theme-editor-highlight-box');
+    expect(OVERLAY_STYLES).toContain('.theme-editor-inspector-panel');
   });
 });
 
@@ -652,5 +745,263 @@ describe('bundle-inline', () => {
     expect(typeof CLIENT_SCRIPT_INLINE).toBe('string');
     expect(CLIENT_SCRIPT_INLINE.length).toBeGreaterThan(100);
     expect(CLIENT_SCRIPT_INLINE).toContain('theme-editor-overlay');
+  });
+});
+
+describe('DomInspector', () => {
+  let dom: ReturnType<typeof setupGlobalDomMocks>;
+  let inspector: DomInspector;
+
+  beforeEach(() => {
+    dom = setupGlobalDomMocks();
+    inspector = new DomInspector();
+  });
+
+  describe('extractStyles', () => {
+    it('extracts all 9 standard style properties with correct categories', () => {
+      const el = createMockElement('div');
+      el.style.color = 'rgb(255, 0, 0)';
+      el.style.backgroundColor = 'rgb(240, 240, 240)';
+      el.style.borderColor = 'rgb(59, 130, 246)';
+      el.style.borderRadius = '8px';
+      el.style.fontSize = '16px';
+      el.style.fontFamily = 'Inter, sans-serif';
+      el.style.padding = '12px 16px';
+      el.style.margin = '0px';
+      el.style.gap = '8px';
+
+      const styles = inspector.extractStyles(el);
+
+      expect(styles.color).toEqual({
+        property: 'color',
+        value: 'rgb(255, 0, 0)',
+        category: 'color'
+      });
+      expect(styles.backgroundColor).toEqual({
+        property: 'backgroundColor',
+        value: 'rgb(240, 240, 240)',
+        category: 'color'
+      });
+      expect(styles.borderColor).toEqual({
+        property: 'borderColor',
+        value: 'rgb(59, 130, 246)',
+        category: 'color'
+      });
+      expect(styles.borderRadius).toEqual({
+        property: 'borderRadius',
+        value: '8px',
+        category: 'dimension'
+      });
+      expect(styles.fontSize).toEqual({
+        property: 'fontSize',
+        value: '16px',
+        category: 'dimension'
+      });
+      expect(styles.fontFamily).toEqual({
+        property: 'fontFamily',
+        value: 'Inter, sans-serif',
+        category: 'font'
+      });
+      expect(styles.padding).toEqual({
+        property: 'padding',
+        value: '12px 16px',
+        category: 'dimension'
+      });
+      expect(styles.margin).toEqual({
+        property: 'margin',
+        value: '0px',
+        category: 'dimension'
+      });
+      expect(styles.gap).toEqual({
+        property: 'gap',
+        value: '8px',
+        category: 'dimension'
+      });
+    });
+
+    it('handles empty or missing computed style properties gracefully', () => {
+      const el = createMockElement('span');
+      const styles = inspector.extractStyles(el);
+      expect(styles.color).toBeDefined();
+      expect(styles.color.value).toBe('');
+      expect(styles.color.category).toBe('color');
+      expect(styles.borderRadius.category).toBe('dimension');
+      expect(styles.fontFamily.category).toBe('font');
+    });
+  });
+
+  describe('findAffectedElements', () => {
+    it('finds elements referencing variable in inline style attribute or property', () => {
+      const container = createMockElement('div');
+      const child1 = createMockElement('button');
+      child1.setAttribute('style', 'color: var(--primary);');
+      const child2 = createMockElement('p');
+      child2.style.setProperty('background-color', 'var(--primary)');
+      const child3 = createMockElement('span');
+      child3.style.color = '#000';
+
+      container.appendChild(child1);
+      container.appendChild(child2);
+      container.appendChild(child3);
+      dom.mockDocument.body.appendChild(container);
+
+      const affected = inspector.findAffectedElements('--primary');
+      expect(affected).toContain(child1);
+      expect(affected).toContain(child2);
+      expect(affected).not.toContain(child3);
+    });
+
+    it('normalizes variable name without -- prefix', () => {
+      const el = createMockElement('div');
+      el.setAttribute('style', 'border-color: var(--card-border);');
+      dom.mockDocument.body.appendChild(el);
+
+      const affected = inspector.findAffectedElements('card-border');
+      expect(affected).toContain(el);
+    });
+
+    it('finds elements defining inline custom property declaration', () => {
+      const el = createMockElement('div');
+      el.style.setProperty('--accent', '#3b82f6');
+      dom.mockDocument.body.appendChild(el);
+
+      const affected = inspector.findAffectedElements('--accent');
+      expect(affected).toContain(el);
+    });
+
+    it('finds elements matching stylesheet rules referencing the variable', () => {
+      const header = createMockElement('header');
+      header.classList.add('site-header');
+      dom.mockDocument.body.appendChild(header);
+
+      // Mock stylesheet rule
+      dom.mockDocument.styleSheets.push({
+        cssRules: [
+          {
+            type: 1,
+            selectorText: '.site-header',
+            cssText: '.site-header { background: var(--header-bg); }'
+          }
+        ]
+      });
+
+      const affected = inspector.findAffectedElements('--header-bg');
+      expect(affected).toContain(header);
+    });
+
+    it('excludes elements inside or part of <theme-editor-overlay>', () => {
+      const overlay = createMockElement('theme-editor-overlay');
+      const inner = createMockElement('div');
+      inner.setAttribute('style', 'color: var(--primary);');
+      overlay.appendChild(inner);
+      dom.mockDocument.body.appendChild(overlay);
+
+      const affected = inspector.findAffectedElements('--primary');
+      expect(affected).not.toContain(overlay);
+      expect(affected).not.toContain(inner);
+    });
+  });
+
+  describe('highlightElements and clearHighlights', () => {
+    it('creates floating highlight box elements for matched elements with label badges', () => {
+      const target = createMockElement('button');
+      dom.mockDocument.body.appendChild(target);
+
+      inspector.highlightElements([target], '--primary');
+
+      const boxes = dom.mockDocument.body.querySelectorAll('.theme-editor-highlight-box');
+      expect(boxes.length).toBe(1);
+      expect(boxes[0].className).toContain('theme-editor-highlight-box');
+      expect(boxes[0].style.position).toBe('fixed');
+      expect(boxes[0].style.top).toBe('10px');
+      expect(boxes[0].style.left).toBe('20px');
+      expect(boxes[0].style.width).toBe('100px');
+      expect(boxes[0].style.height).toBe('50px');
+
+      const badge = boxes[0].querySelector('.theme-editor-highlight-badge');
+      expect(badge).toBeDefined();
+      expect(badge.textContent).toBe('--primary');
+    });
+
+    it('clears all active highlight boxes on clearHighlights', () => {
+      const target1 = createMockElement('div');
+      const target2 = createMockElement('div');
+      dom.mockDocument.body.appendChild(target1);
+      dom.mockDocument.body.appendChild(target2);
+
+      inspector.highlightElements([target1, target2], 'test');
+      expect(dom.mockDocument.body.querySelectorAll('.theme-editor-highlight-box').length).toBe(2);
+
+      inspector.clearHighlights();
+      expect(dom.mockDocument.body.querySelectorAll('.theme-editor-highlight-box').length).toBe(0);
+    });
+
+    it('skips elements that are theme editor overlays', () => {
+      const overlay = createMockElement('theme-editor-overlay');
+      inspector.highlightElements([overlay]);
+      expect(dom.mockDocument.body.querySelectorAll('.theme-editor-highlight-box').length).toBe(0);
+    });
+  });
+
+  describe('enablePicker and disablePicker', () => {
+    it('attaches mouse and keyboard listeners, and sets cursor', () => {
+      inspector.enablePicker(() => {});
+      expect(inspector.isPickerActive).toBe(true);
+      expect(dom.mockDocument.body.style.cursor).toBe('crosshair');
+
+      inspector.disablePicker();
+      expect(inspector.isPickerActive).toBe(false);
+      expect(dom.mockDocument.body.style.cursor).toBe('');
+    });
+
+    it('disables picker and clears highlights on Escape key', () => {
+      inspector.enablePicker(() => {});
+      expect(inspector.isPickerActive).toBe(true);
+
+      dom.mockDocument.dispatchEvent({ type: 'keydown', key: 'Escape' });
+      expect(inspector.isPickerActive).toBe(false);
+    });
+
+    it('invokes onSelect on click with element and extracted styles, then disables picker', () => {
+      const onSelect = vi.fn();
+      const target = createMockElement('button');
+      target.style.color = '#3b82f6';
+      dom.mockDocument.body.appendChild(target);
+
+      dom.mockDocument.elementsFromPoint = vi.fn().mockReturnValue([target]);
+      dom.mockDocument.elementFromPoint = vi.fn().mockReturnValue(target);
+
+      inspector.enablePicker(onSelect);
+
+      // Simulate mousemove to trigger highlight
+      dom.mockDocument.dispatchEvent({
+        type: 'mousemove',
+        clientX: 50,
+        clientY: 50,
+        target
+      });
+      expect(dom.mockDocument.body.querySelectorAll('.theme-editor-highlight-box').length).toBe(1);
+
+      // Simulate click to select element
+      const clickEvent = {
+        type: 'click',
+        clientX: 50,
+        clientY: 50,
+        target,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn()
+      };
+      dom.mockDocument.dispatchEvent(clickEvent);
+
+      expect(clickEvent.preventDefault).toHaveBeenCalled();
+      expect(clickEvent.stopPropagation).toHaveBeenCalled();
+      expect(onSelect).toHaveBeenCalledWith(
+        target,
+        expect.objectContaining({
+          color: expect.objectContaining({ value: '#3b82f6', category: 'color' })
+        })
+      );
+      expect(inspector.isPickerActive).toBe(false);
+    });
   });
 });
