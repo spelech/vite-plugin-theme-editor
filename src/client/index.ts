@@ -3,6 +3,7 @@ import { ThemeEditorOverlay, registerThemeEditorOverlay } from './overlay';
 export * from './styles';
 export * from './controls';
 export * from './diff-modal';
+export * from './inspector';
 export * from './overlay';
 
 export function initClient(): void {

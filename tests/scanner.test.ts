@@ -41,8 +41,51 @@ describe('scanner', () => {
     const results = await scanProjectStylesheets(tempDir);
     expect(results).toHaveLength(1);
     expect(results[0].relativePath).toBe(path.join('src', 'style.css'));
+    expect(results[0].rootSelectors).toEqual([':root']);
     expect(results[0].variables).toHaveLength(1);
     expect(results[0].variables[0].name).toBe('--test-color');
+    expect(results[0].variables[0].selector).toBe(':root');
+
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('scans variables across multiple selectors like :root, [data-theme="dark"], and :host', () => {
+    const css = `
+      :root {
+        --primary: #3b82f6;
+      }
+      [data-theme="dark"] {
+        --primary: #60a5fa;
+        --bg: #1e293b;
+      }
+      .custom-scope {
+        --radius: 8px;
+      }
+    `;
+    const vars = parseCssVariables(css);
+    expect(vars).toHaveLength(4);
+    expect(vars[0].selector).toBe(':root');
+    expect(vars[0].name).toBe('--primary');
+    expect(vars[1].selector).toBe('[data-theme="dark"]');
+    expect(vars[1].name).toBe('--primary');
+    expect(vars[2].selector).toBe('[data-theme="dark"]');
+    expect(vars[3].selector).toBe('.custom-scope');
+  });
+
+  it('collects unique rootSelectors in scanned stylesheets', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'scanner-test-'));
+    const srcDir = path.join(tempDir, 'src');
+    await fs.mkdir(srcDir, { recursive: true });
+
+    const cssPath = path.join(srcDir, 'style.css');
+    await fs.writeFile(
+      cssPath,
+      `:root { --primary: #000; --secondary: #111; }\n[data-theme="dark"] { --primary: #fff; }`
+    );
+
+    const results = await scanProjectStylesheets(tempDir);
+    expect(results).toHaveLength(1);
+    expect(results[0].rootSelectors).toEqual([':root', '[data-theme="dark"]']);
 
     await fs.rm(tempDir, { recursive: true, force: true });
   });

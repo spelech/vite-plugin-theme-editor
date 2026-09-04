@@ -49,4 +49,51 @@ describe('rewriter', () => {
 
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
+
+  it('updates variables within their specific selectors', () => {
+    const original = `
+    :root {
+      --primary: #000;
+    }
+    [data-theme="dark"] {
+      --primary-dark: #fff;
+    }
+  `;
+    const updated = updateCssVariables(original, { '--primary-dark': '#3b82f6' });
+    expect(updated).toContain('--primary-dark: #3b82f6;');
+  });
+
+  it('inserts new variable declarations into existing or new selector blocks', () => {
+    const original = `
+    :root {
+      --primary: #000;
+    }
+  `;
+    const updated = updateCssVariables(original, {}, [
+      { selector: ':root', name: '--card-radius', value: '12px' },
+      { selector: '[data-theme="dark"]', name: '--bg-dark', value: '#111' }
+    ]);
+    expect(updated).toContain('--card-radius: 12px;');
+    expect(updated).toContain('[data-theme="dark"]');
+    expect(updated).toContain('--bg-dark: #111;');
+  });
+
+  it('saves CSS changes with new variables to disk', async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rewriter-test-newvar-'));
+    const testFile = path.join(tmpDir, 'theme.css');
+    const original = `:root {\n  --primary: #123456;\n}\n`;
+    await fs.writeFile(testFile, original, 'utf-8');
+
+    await saveCssChanges({
+      filePath: testFile,
+      updates: {},
+      newVariables: [{ selector: ':root', name: '--accent', value: '#ff0055' }]
+    });
+
+    const result = await fs.readFile(testFile, 'utf-8');
+    expect(result).toContain('--accent: #ff0055');
+
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
 });
+

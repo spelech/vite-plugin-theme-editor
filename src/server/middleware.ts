@@ -56,7 +56,7 @@ export function createThemeEditorMiddleware(rootDir: string, options: ThemeEdito
           return sendJson({ success: false, error: 'Path traversal forbidden' }, 403);
         }
         const originalContent = await fs.readFile(fullPath, 'utf-8');
-        const modifiedContent = updateCssVariables(originalContent, payload.updates);
+        const modifiedContent = updateCssVariables(originalContent, payload.updates || {}, payload.newVariables || []);
         const diff = generateDiff(payload.filePath, originalContent, modifiedContent);
         return sendJson({ success: true, diff });
       }
