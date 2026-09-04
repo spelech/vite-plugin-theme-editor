@@ -146,6 +146,33 @@ describe('middleware', () => {
     expect(diskContent).toContain('--primary-color: #3b82f6;');
   });
 
+  it('handles /diff endpoint with newVariables and returns preview diff', async () => {
+    const middleware = createThemeEditorMiddleware(tempDir);
+    const req = createMockReq({
+      url: '/__theme_editor/api/diff',
+      method: 'POST',
+      body: {
+        filePath: 'src/theme.css',
+        updates: {},
+        newVariables: [
+          { selector: ':root', name: '--card-padding', value: '20px' },
+          { selector: '[data-theme="dark"]', name: '--dark-bg', value: '#111827' }
+        ]
+      }
+    });
+    const { res, getResult } = createMockRes();
+
+    await middleware(req, res, () => {});
+
+    const response = await getResult();
+    expect(response.statusCode).toBe(200);
+    expect(response.body.success).toBe(true);
+    expect(response.body.diff.unifiedDiff).toContain('+  --card-padding: 20px;');
+    expect(response.body.diff.unifiedDiff).toContain('[data-theme="dark"]');
+    expect(response.body.diff.unifiedDiff).toContain('+  --dark-bg: #111827;');
+  });
+
+
   it('prevents path traversal on /diff endpoint', async () => {
     const middleware = createThemeEditorMiddleware(tempDir);
     const req = createMockReq({
@@ -194,7 +221,38 @@ describe('middleware', () => {
     expect(diskContent).toContain('--radius: 16px;');
   });
 
+  it('handles /save endpoint with newVariables and writes new variable declarations to disk', async () => {
+    const middleware = createThemeEditorMiddleware(tempDir);
+    const req = createMockReq({
+      url: '/__theme_editor/api/save',
+      method: 'POST',
+      body: {
+        filePath: 'src/theme.css',
+        updates: {},
+        newVariables: [
+          { selector: ':root', name: '--card-padding', value: '24px' },
+          { selector: '[data-theme="dark"]', name: '--dark-bg', value: '#0f172a' }
+        ]
+      }
+    });
+    const { res, getResult } = createMockRes();
+
+    await middleware(req, res, () => {});
+
+    const response = await getResult();
+    expect(response.statusCode).toBe(200);
+    expect(response.body.success).toBe(true);
+    expect(response.body.message).toBe('Styles written to disk');
+
+    // Verify disk content contains new variables
+    const diskContent = await fs.readFile(cssFile, 'utf-8');
+    expect(diskContent).toContain('--card-padding: 24px;');
+    expect(diskContent).toContain('[data-theme="dark"]');
+    expect(diskContent).toContain('--dark-bg: #0f172a;');
+  });
+
   it('prevents path traversal on /save endpoint', async () => {
+
     const middleware = createThemeEditorMiddleware(tempDir);
     const req = createMockReq({
       url: '/__theme_editor/api/save',
