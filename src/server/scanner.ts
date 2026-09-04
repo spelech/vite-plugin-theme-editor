@@ -52,19 +52,18 @@ export function parseCssVariables(cssContent: string): ThemeVariable[] {
   const variables: ThemeVariable[] = [];
 
   root.walkRules((rule) => {
-    if (rule.selector.includes(':root') || rule.selector.includes('html') || rule.selector.includes('body')) {
-      rule.walkDecls((decl: Declaration) => {
-        if (decl.prop.startsWith('--')) {
-          variables.push({
-            name: decl.prop,
-            value: decl.value,
-            inferredType: inferVariableType(decl.value, decl.prop),
-            line: decl.source?.start?.line,
-            rawBefore: decl.raws.before
-          });
-        }
-      });
-    }
+    rule.walkDecls((decl: Declaration) => {
+      if (decl.prop.startsWith('--')) {
+        variables.push({
+          name: decl.prop,
+          value: decl.value,
+          inferredType: inferVariableType(decl.value, decl.prop),
+          selector: rule.selector.trim(),
+          line: decl.source?.start?.line,
+          rawBefore: decl.raws.before
+        });
+      }
+    });
   });
 
   return variables;
@@ -87,9 +86,11 @@ export async function scanProjectStylesheets(rootDir: string, options: ThemeEdit
       const content = await fs.readFile(file, 'utf-8');
       const variables = parseCssVariables(content);
       if (variables.length > 0) {
+        const rootSelectors = Array.from(new Set(variables.map(v => v.selector)));
         results.push({
           filePath: file,
           relativePath: path.relative(rootDir, file),
+          rootSelectors,
           variables
         });
       }
@@ -100,3 +101,4 @@ export async function scanProjectStylesheets(rootDir: string, options: ThemeEdit
 
   return results;
 }
+

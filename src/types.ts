@@ -4,6 +4,7 @@ export interface ThemeVariable {
   name: string;
   value: string;
   inferredType: VariableType;
+  selector: string;
   unit?: string;
   rawBefore?: string;
   line?: number;
@@ -12,13 +13,20 @@ export interface ThemeVariable {
 export interface FileThemeMap {
   filePath: string;
   relativePath: string;
+  rootSelectors: string[];
   variables: ThemeVariable[];
 }
 
-export interface ThemeEditorOptions {
-  include?: string[];
-  exclude?: string[];
-  defaultOpen?: boolean;
+export interface NewVariablePayload {
+  selector: string;
+  name: string;
+  value: string;
+}
+
+export interface SavePayload {
+  filePath: string;
+  updates: Record<string, string>;
+  newVariables?: NewVariablePayload[];
 }
 
 export interface DiffResult {
@@ -29,7 +37,8 @@ export interface DiffResult {
   changesCount: number;
 }
 
-export interface SavePayload {
-  filePath: string;
-  updates: Record<string, string>;
+export interface ThemeEditorOptions {
+  include?: string[];
+  exclude?: string[];
+  defaultOpen?: boolean;
 }
