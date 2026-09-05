@@ -1,4 +1,8 @@
-# vite-plugin-theme-editor
+# @spelech/vite-plugin-theme-editor
+
+[![CI](https://github.com/spelech/vite-plugin-theme-editor/actions/workflows/ci.yml/badge.svg)](https://github.com/spelech/vite-plugin-theme-editor/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@spelech/vite-plugin-theme-editor.svg)](https://www.npmjs.com/package/@spelech/vite-plugin-theme-editor)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
 > Live in-browser CSS variable (`:root`) theme editor with instant visual feedback and AST-preserving disk sync for Vite projects.
 
@@ -23,7 +27,7 @@
 ## Installation
 
 ```bash
-npm install -D vite-plugin-theme-editor
+npm install -D @spelech/vite-plugin-theme-editor
 ```
 
 ---
@@ -35,7 +39,7 @@ Add the plugin to your `vite.config.ts` or `vite.config.js`:
 ```typescript
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { themeEditorPlugin } from 'vite-plugin-theme-editor';
+import { themeEditorPlugin } from '@spelech/vite-plugin-theme-editor';
 
 export default defineConfig({
   plugins: [
@@ -75,4 +79,4 @@ interface ThemeEditorOptions {
 
 ## License
 
-MIT
+MIT © [spelech](https://github.com/spelech)
